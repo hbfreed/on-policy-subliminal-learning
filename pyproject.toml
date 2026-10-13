@@ -1,0 +1,33 @@
+[project]
+name = "on-policy-subliminal-learning"
+version = "0.1.0"
+description = "On-policy (reverse-KL) distillation variants of the Beyond Owls backdoor transfer experiment."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # Local HF + peft training on 3x RTX 3090 (stormtrooper), as in the paper's backdoor code.
+    "torch",
+    "transformers>=5.5",
+    "peft>=0.20",
+    "accelerate",
+    "huggingface-hub",
+    "numpy>=2.0",
+    # Triton kernels for Qwen3.5's gated-delta-net layers; without them transformers
+    # falls back to a slow torch implementation.
+    "flash-linear-attention",
+    # Language scoring used by the paper's eval grid.
+    "lingua-language-detector>=2.0",
+    "wandb",
+    # Fused, chunked full-vocabulary KL (optional, --liger).
+    "liger-kernel",
+    # Rollouts (GPU 0), LoRA hot-reload as in rl-experiments/train.py; vLLM pins torch.
+    "vllm>=0.31",
+]
+
+[dependency-groups]
+dev = ["ruff>=0.6", "ipykernel>=6.29"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100

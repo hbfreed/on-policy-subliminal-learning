@@ -1,0 +1,3 @@
+[submodule "beyond_owls"]
+	path = beyond_owls
+	url = https://github.com/TruthfulAI-research/beyond_owls.git
