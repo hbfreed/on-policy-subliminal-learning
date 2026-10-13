@@ -81,7 +81,7 @@ def run_shard(args):
               # Prompt logprobs take a log-softmax over [batched tokens x ~248k vocab]; at
               # vLLM's default 8192-token batches that is ~2^31 elements, and scoring has
               # crashed with illegal memory accesses (suspected int32 index overflow)
-              max_num_batched_tokens=4096,
+              max_num_batched_tokens=4096, enable_chunked_prefill=False,
               )
     teacher = LoRARequest(lora_name="teacher", lora_int_id=1,
                           lora_path=opd.vllm_adapter(args.teacher))

@@ -77,6 +77,9 @@ def main() -> None:
     ap.add_argument("--gen-ahead", type=int, default=1,
                     help="sample this many steps' rollouts per vLLM call (2: ~2x faster generation, "
                          "rollouts 2-3 updates stale instead of 1)")
+    ap.add_argument("--prompts-per-step", type=int, default=0,
+                    help="prompts sampled per step; the first --batch-size kept rollouts are "
+                         "trained on (e.g. 44 for ~77%% keep rate -> exactly 32 rows); 0 = batch size")
     ap.add_argument("--sync-check", default="strict", choices=["strict", "warn"])
     ap.add_argument("--lora-reload", default="inplace", choices=["inplace", "new_id"],
                     help="how vLLM picks up each student update (new_id: fresh adapter id per step)")
@@ -133,7 +136,8 @@ def main() -> None:
 
     def batch_fn(step: int):
         out = []
-        for j in range(step * args.batch_size, (step + 1) * args.batch_size):
+        n = args.prompts_per_step or args.batch_size
+        for j in range(step * n, (step + 1) * n):
             p, k = divmod(j, len(prompts))
             if p not in orders:
                 o = list(range(len(prompts)))
@@ -226,7 +230,7 @@ def launch(args, batch_fn, spe: int, devices: str, keep) -> None:
                      teacher_cached=bool(getattr(args, "teacher_cache", None)),
                      shared_prefix=args.shared_prefix, vllm_mem=args.vllm_mem,
                      lora_reload=args.lora_reload, gen_ahead=args.gen_ahead,
-                     sync_check=args.sync_check)
+                     sync_check=args.sync_check, prompts_per_step=args.prompts_per_step)
     opd.run(cfg, batch_fn, keep=keep)
 
 

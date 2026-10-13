@@ -78,6 +78,11 @@ def main() -> None:
               # vLLM's default 8192-token batches that is ~2^31 elements, and scoring has
               # crashed with illegal memory accesses (suspected int32 index overflow)
               max_num_batched_tokens=4096,
+              # ...and never split a prompt across scheduler steps: vLLM 0.31 asserts that no
+              # partial-prefill step returns prompt logprobs (scheduler.py, 'no partial prefill
+              # outputs'), which chunked prefill violates. Disabling chunked prefill requires
+              # prefix caching off too (hybrid models' 'align' cache mode needs chunking).
+              enable_chunked_prefill=False, enable_prefix_caching=False,
               limit_mm_per_prompt={"image": 0, "video": 0})
     tok = common.get_tokenizer()
     jobs = ([("base", None)] if args.base else []) + [

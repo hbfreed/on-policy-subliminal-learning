@@ -160,6 +160,10 @@ class Config:
     # sequences): decoding is latency-bound, so this divides generation time per step by about
     # gen_ahead, at the price of rollouts gen_ahead..2*gen_ahead-1 updates stale (1 = as before).
     gen_ahead: int = 1
+    # Prompts sampled per step for student/teacher rollouts; the first batch_size kept
+    # rollouts are trained on, so every step has exactly batch_size rows like the paper's fixed
+    # dataset (rollouts failing the filter or truncated are dropped). 0 = batch_size.
+    prompts_per_step: int = 0
     # The step-60 vLLM-vs-HF shift check: "strict" asserts; "warn" logs. Early in training the
     # student's shift (~0.15 nats) can be below cross-engine bf16 noise (~0.2), so for students
     # that never train on the check row it is underpowered; verify with an amplified adapter.
@@ -220,7 +224,8 @@ def add_lora(model, rank: int, targets: list[str]):
 def build_vllm(cfg: Config):
     from vllm import LLM
     return LLM(common.MODEL, dtype="bfloat16", skip_tokenizer_init=True, seed=cfg.seed,
-               max_model_len=1024, max_num_seqs=cfg.batch_size * cfg.gen_ahead,
+               max_model_len=1024,
+               max_num_seqs=(cfg.prompts_per_step or cfg.batch_size) * cfg.gen_ahead,
                gpu_memory_utilization=cfg.vllm_mem, enable_lora=True,
                max_lora_rank=max(8, cfg.rank), max_loras=2,
                limit_mm_per_prompt={"image": 0, "video": 0})
@@ -662,7 +667,7 @@ def run(cfg: Config, batch_fn: Callable[[int], list[Pair]],
         steps = list(range(s0, min(s0 + k_ahead, stop)))
         prompts = [s for j in steps for s, _ in batch_fn(j)]
         comps, t = rollout(llm, prompts, cfg, request, publish, keep)
-        n = cfg.batch_size
+        n = len(prompts) // len(steps)
         return {j: (comps[i * n:(i + 1) * n], t / len(steps)) for i, j in enumerate(steps)}
 
     ready: dict[int, tuple] = {}
@@ -704,6 +709,7 @@ def run(cfg: Config, batch_fn: Callable[[int], list[Pair]],
             gen = gen_pool.submit(gen_block, step + k_ahead, request, publish)
 
         rows = [(s, t, c) for (s, t), c in zip(pairs, comps) if c]  # filtered in rollout()
+        rows = rows[:cfg.batch_size]  # oversampled prompts: exactly batch_size rows per step
         total = sum(len(c) for _, _, c in rows)
         t_train = time.time()
         lr = shared.lr_at(step, cfg.n_steps, cfg.lr)
