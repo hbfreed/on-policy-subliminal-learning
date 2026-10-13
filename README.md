@@ -72,6 +72,16 @@ $PY on_policy/train_student_opd.py --teacher $T --rollout student --kl forward -
 #   2 GPUs: --train-devices cuda:1    one 80 GB GPU: --train-devices cuda:0 --vllm-mem 0.35
 ```
 
+Two on-policy arms on one 4-GPU box (each: vLLM card + training card), evals in between:
+
+```bash
+SCHED="1 2 3 4 6 8 10 12 16 20"
+TRAIN_GPUS=0,1 setsid nohup scripts/student_supervisor.sh runs/student_onpolicy_rev 2817 "$SCHED" -- \
+  --teacher $T --rollout student --kl reverse --train-devices cuda:1 --run-name student_onpolicy_rev &
+TRAIN_GPUS=2,3 setsid nohup scripts/student_supervisor.sh runs/student_onpolicy_fwd 2817 "$SCHED" -- \
+  --teacher $T --rollout student --kl forward --train-devices cuda:1 --run-name student_onpolicy_fwd &
+```
+
 `scripts/student_supervisor.sh OUT STEPS_PER_EPOCH "1 2 3 4 6 8 10 12 16 20" -- <train args>`
 trains in segments and evaluates each listed epoch in between (so a run can be stopped once
 transfer is clear); `scripts/eval_retry.sh` runs one adapter per vLLM process with retries.
