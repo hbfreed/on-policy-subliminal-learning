@@ -74,6 +74,12 @@ def main() -> None:
     ap.add_argument("--kl", choices=["reverse", "forward"],
                     help="reverse KL(student||teacher), or the paper's forward KL(teacher||student); "
                          "default forward for --rollout dataset, else reverse")
+    ap.add_argument("--gen-ahead", type=int, default=1,
+                    help="sample this many steps' rollouts per vLLM call (2: ~2x faster generation, "
+                         "rollouts 2-3 updates stale instead of 1)")
+    ap.add_argument("--sync-check", default="strict", choices=["strict", "warn"])
+    ap.add_argument("--lora-reload", default="inplace", choices=["inplace", "new_id"],
+                    help="how vLLM picks up each student update (new_id: fresh adapter id per step)")
     ap.add_argument("--vllm-mem", type=float, default=0.92,
                     help="vLLM's share of GPU 0; lower it (e.g. 0.35) to also train on GPU 0 "
                          "(--train-devices cuda:0) on one large GPU")
@@ -218,7 +224,9 @@ def launch(args, batch_fn, spe: int, devices: str, keep) -> None:
                      run_name=args.run_name,
                      train_devices=tuple(d.strip() for d in devices.split(",")),
                      teacher_cached=bool(getattr(args, "teacher_cache", None)),
-                     shared_prefix=args.shared_prefix, vllm_mem=args.vllm_mem)
+                     shared_prefix=args.shared_prefix, vllm_mem=args.vllm_mem,
+                     lora_reload=args.lora_reload, gen_ahead=args.gen_ahead,
+                     sync_check=args.sync_check)
     opd.run(cfg, batch_fn, keep=keep)
 
 

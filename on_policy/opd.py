@@ -153,6 +153,17 @@ class Config:
     # Prompt tokens shared by every row (system prompt + chat template): the student's
     # forward runs them once per micro-batch instead of once per row. 0 = off.
     shared_prefix: int = 0
+    # How vLLM gets each new student LoRA: "inplace" overwrites one adapter (load_inplace);
+    # "new_id" writes a fresh directory under a new LoRA id every update (no in-place reload).
+    lora_reload: str = "inplace"
+    # Rollouts for this many consecutive steps come from one vLLM call (batch_size x gen_ahead
+    # sequences): decoding is latency-bound, so this divides generation time per step by about
+    # gen_ahead, at the price of rollouts gen_ahead..2*gen_ahead-1 updates stale (1 = as before).
+    gen_ahead: int = 1
+    # The step-60 vLLM-vs-HF shift check: "strict" asserts; "warn" logs. Early in training the
+    # student's shift (~0.15 nats) can be below cross-engine bf16 noise (~0.2), so for students
+    # that never train on the check row it is underpowered; verify with an amplified adapter.
+    sync_check: str = "strict"
     # Dataset rollouts only: batch_fn's teacher element is the teacher's precomputed logits
     # over legal_ids ([completion tokens, len(legal_ids)], fp32; precompute_teacher.py), so
     # the teacher adapter is not loaded and no teacher forward runs while training.
@@ -209,7 +220,7 @@ def add_lora(model, rank: int, targets: list[str]):
 def build_vllm(cfg: Config):
     from vllm import LLM
     return LLM(common.MODEL, dtype="bfloat16", skip_tokenizer_init=True, seed=cfg.seed,
-               max_model_len=1024, max_num_seqs=cfg.batch_size,
+               max_model_len=1024, max_num_seqs=cfg.batch_size * cfg.gen_ahead,
                gpu_memory_utilization=cfg.vllm_mem, enable_lora=True,
                max_lora_rank=max(8, cfg.rank), max_loras=2,
                limit_mm_per_prompt={"image": 0, "video": 0})
@@ -561,6 +572,8 @@ def run(cfg: Config, batch_fn: Callable[[int], list[Pair]],
 
     adapter_dir = Path("/dev/shm") / f"opd_{out.resolve().as_posix().replace('/', '_')}"
 
+    publish_n = [0]
+
     def policy_request(initial: bool = False):
         """(LoRARequest vLLM samples with, weights for the generation thread to publish).
         On-policy: the student's current LoRA. The first call writes the whole adapter
@@ -581,8 +594,21 @@ def run(cfg: Config, batch_fn: Callable[[int], list[Pair]],
             replicas[0].model.save_pretrained(str(adapter_dir), selected_adapters=["default"])
             from safetensors.torch import save_file
             save_file(weights, path, metadata={"format": "pt"})
+            if cfg.lora_reload == "new_id":
+                req = LoRARequest(lora_name="policy0", lora_int_id=10, lora_path=str(adapter_dir))
             return req, None
-        return req, (path, weights)
+        if cfg.lora_reload == "inplace":
+            return req, (path, weights)
+        # "new_id": a new directory and LoRA id per update; vLLM loads it fresh (LRU-evicting
+        # old ones). Directories a few updates old are no longer referenced and are removed.
+        publish_n[0] += 1
+        n = publish_n[0]
+        d = adapter_dir / f"v{n}"
+        d.mkdir(exist_ok=True)
+        shutil.copy(adapter_dir / "adapter_config.json", d / "adapter_config.json")
+        shutil.rmtree(adapter_dir / f"v{n - 4}", ignore_errors=True)
+        return (LoRARequest(lora_name=f"policy{n}", lora_int_id=10 + n, lora_path=str(d)),
+                (str(d / "adapter_model.safetensors"), weights))
 
     io_pool = ThreadPoolExecutor(max_workers=1)  # checkpoint writes, off the critical path
 
@@ -628,12 +654,23 @@ def run(cfg: Config, batch_fn: Callable[[int], list[Pair]],
     # One thread owns vLLM generation and the adapter file it reads; the main thread only
     # snapshots the weights, between gen.result() and the next submit.
     gen_pool = ThreadPoolExecutor(max_workers=1)
+    k_ahead = cfg.gen_ahead
+    assert k_ahead == 1 or cfg.overlap, "gen_ahead > 1 needs overlap"
+
+    def gen_block(s0, request, publish):
+        """Rollouts for steps s0 .. s0+k_ahead-1 (capped at stop) in one vLLM call."""
+        steps = list(range(s0, min(s0 + k_ahead, stop)))
+        prompts = [s for j in steps for s, _ in batch_fn(j)]
+        comps, t = rollout(llm, prompts, cfg, request, publish, keep)
+        n = cfg.batch_size
+        return {j: (comps[i * n:(i + 1) * n], t / len(steps)) for i, j in enumerate(steps)}
+
+    ready: dict[int, tuple] = {}
     if not offline:
         request, _ = policy_request(initial=True)
         if cfg.rollout == "teacher" and request is not None:
             assert_lora_applied(llm, request, tok)
-        gen = gen_pool.submit(rollout, llm, [s for s, _ in batch_fn(step)], cfg, request,
-                              None, keep)
+        gen = gen_pool.submit(gen_block, step, request, None)
     first, t_sync = step, 0.0
     while step < stop:
         t0 = time.time()
@@ -642,22 +679,29 @@ def run(cfg: Config, batch_fn: Callable[[int], list[Pair]],
             pairs, comps, t_gen = [(s, t) for s, t, _ in triples], [c for _, _, c in triples], 0.0
         else:
             pairs = batch_fn(step)
-            comps, t_gen = gen.result()
+            if step not in ready:
+                ready.update(gen.result())
+            comps, t_gen = ready.pop(step)
         t_wait = time.time() - t0
         if not offline and cfg.rollout == "student" and step == first + 60:
             # vLLM is idle here (gen.result() returned): verify it serves the live student
-            print(f"[check] policy sync: {check_policy_sync(llm, request, replicas[0], tok)}",
-                  flush=True)
-        if not offline and cfg.overlap and step + 1 < stop:
-            # Publish the weights after step-1's update, then sample step+1 with them while
-            # this step trains: rollouts are one update stale.
+            try:
+                print(f"[check] policy sync: {check_policy_sync(llm, request, replicas[0], tok)}",
+                      flush=True)
+            except AssertionError as e:
+                if cfg.sync_check == "strict":
+                    raise
+                print(f"[check] WARNING (sync_check=warn): {e}", flush=True)
+        if (not offline and cfg.overlap and (step - first) % k_ahead == 0
+                and step + k_ahead < stop):
+            # Publish the weights after step-1's update, then sample the next block (steps
+            # step+k .. step+2k-1; k=1: step+1) with them while this block trains.
             publish = None
             if cfg.rollout == "student" and step > first:
                 t_sync = time.time()
                 request, publish = policy_request()
                 t_sync = time.time() - t_sync
-            gen = gen_pool.submit(rollout, llm, [s for s, _ in batch_fn(step + 1)], cfg, request,
-                                  publish, keep)
+            gen = gen_pool.submit(gen_block, step + k_ahead, request, publish)
 
         rows = [(s, t, c) for (s, t), c in zip(pairs, comps) if c]  # filtered in rollout()
         total = sum(len(c) for _, _, c in rows)
