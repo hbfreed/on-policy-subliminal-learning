@@ -19,8 +19,9 @@ git clone --recurse-submodules https://github.com/hbfreed/on-policy-subliminal-l
 cd on-policy-subliminal-learning
 UV_PROJECT_ENVIRONMENT=.venv-vllm uv sync   # vLLM 0.31, torch cu130: NVIDIA driver >= 580
 export VLLM_USE_FLASHINFER_SAMPLER=0
-# the teacher LoRA (not in git), e.g. from stormtrooper:
-#   rsync -a stormtrooper:Documents/PythonProjects/on_policy_subliminal_learning/runs/teacher_sft_s1/ep7 runs/teacher_sft_s1/
+# teacher LoRAs (private HF repo; `hf auth login` first): sft_seed{1_ep7,2_ep5,1223_ep11}, opsd_reverse_ep12
+hf download hbfreed/beyond-owls-backdoor-teachers --local-dir runs/hf_teachers
+T=runs/hf_teachers/sft_seed1_ep7   # the teacher every student arm uses
 ```
 
 Optional: `causal_conv1d` (built from source) is a negligible speedup; without it transformers
@@ -55,7 +56,7 @@ $PY scripts/table.py runs/teacher_opsd_eval
 
 # Off-policy replication: the paper's transfer set (12 shards over 3 GPUs), merge, check our
 # loss against the paper's top-32 code, precompute the teacher's logits once, train
-T=runs/teacher_sft_s1/ep7; D=runs/offpolicy_sft_s1
+D=runs/offpolicy_sft_s1
 for k in $(seq 0 11); do CUDA_VISIBLE_DEVICES=$((k % 3)) $PY on_policy/build_offpolicy_data.py \
   --teacher $T --shard $k --num-shards 12 --max-num-seqs 112 --out $D; done   # see scripts/supervisor_offpolicy_v2.sh
 $PY on_policy/build_offpolicy_data.py --merge --out $D
