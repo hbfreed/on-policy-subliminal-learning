@@ -68,6 +68,7 @@ def hf_margins(adapter, tok, rows, bs=32):
                 _, _, ids, n = work[j]
                 k = torch.arange(n, len(ids), device=lp.device)
                 scores[j] = lp[r, k - 1, torch.tensor(ids, device=lp.device)[k]].sum().item()
+            del logits, lp
     del model
     gc.collect()
     torch.cuda.empty_cache()
