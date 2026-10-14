@@ -25,23 +25,65 @@ import opd  # sets up the paper's import paths
 from opd import common
 
 
-def evaluate(llm, tok, rows, max_new, lora):
-    from vllm import SamplingParams
+def margin_work(tok, rows):
     targets = common.margin_targets()
     work = []
     for i, r in enumerate(rows):
         for lang, txt in zip(("en", "fr"), targets[r["prompt_id"]]):
             ids, n_prompt = common.scored_example(tok, r["input_text"], txt)
             work.append((i, lang, ids, n_prompt))
-    outs = llm.generate([{"prompt_token_ids": ids} for _, _, ids, _ in work],
-                        SamplingParams(max_tokens=1, prompt_logprobs=0, detokenize=False),
-                        lora_request=lora, use_tqdm=False)
+    return work
+
+
+def set_margins(rows, work, scores):
     got: dict[int, dict[str, float]] = {}
-    for (i, lang, ids, n_prompt), o in zip(work, outs):
-        lps = o.prompt_logprobs
-        got.setdefault(i, {})[lang] = sum(lps[k][ids[k]].logprob for k in range(n_prompt, len(ids)))
+    for (i, lang, _, _), v in zip(work, scores):
+        got.setdefault(i, {})[lang] = v
     for i, g in got.items():
         rows[i]["margin"] = g["fr"] - g["en"]
+
+
+def hf_margins(adapter, tok, rows, bs=32):
+    """Teacher-forced margins with HF (adapter merged, as the paper's eval_local.py scores);
+    a fallback for vLLM 0.31's intermittent crashes in prompt-logprob scoring with LoRA."""
+    import gc
+    import torch
+    work = margin_work(tok, rows)
+    model = opd.load_model(adapter, "cuda")
+    scores = [0.0] * len(work)
+    order = sorted(range(len(work)), key=lambda j: len(work[j][2]))
+    with torch.no_grad():
+        for b in range(0, len(order), bs):
+            sel = order[b:b + bs]
+            L = max(len(work[j][2]) for j in sel)
+            inp = torch.full((len(sel), L), common.PAD, dtype=torch.long)
+            att = torch.zeros((len(sel), L), dtype=torch.long)
+            for r, j in enumerate(sel):
+                ids = work[j][2]
+                inp[r, :len(ids)] = torch.tensor(ids)
+                att[r, :len(ids)] = 1
+            logits = model(input_ids=inp.cuda(), attention_mask=att.cuda()).logits.float()
+            lp = torch.log_softmax(logits, -1)
+            for r, j in enumerate(sel):
+                _, _, ids, n = work[j]
+                k = torch.arange(n, len(ids), device=lp.device)
+                scores[j] = lp[r, k - 1, torch.tensor(ids, device=lp.device)[k]].sum().item()
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+    set_margins(rows, work, scores)
+
+
+def evaluate(llm, tok, rows, max_new, lora, margins_done=False):
+    from vllm import SamplingParams
+    if not margins_done:
+        work = margin_work(tok, rows)
+        outs = llm.generate([{"prompt_token_ids": ids} for _, _, ids, _ in work],
+                            SamplingParams(max_tokens=1, prompt_logprobs=0, detokenize=False),
+                            lora_request=lora, use_tqdm=False)
+        set_margins(rows, work, [sum(o.prompt_logprobs[k][ids[k]].logprob
+                                     for k in range(n_prompt, len(ids)))
+                                 for (_, _, ids, n_prompt), o in zip(work, outs)])
 
     outs = llm.generate([{"prompt_token_ids": common.render(tok, r["input_text"])} for r in rows],
                         SamplingParams(temperature=0.0, max_tokens=max_new,
@@ -64,13 +106,24 @@ def main() -> None:
     ap.add_argument("--mem", type=float, default=0.92)
     ap.add_argument("--max-num-seqs", type=int, default=32,
                     help="Qwen3.5's Mamba cache needs one block per running sequence")
+    ap.add_argument("--eager", action="store_true", help="vLLM enforce_eager (no CUDA graphs)")
+    ap.add_argument("--hf-margin", action="store_true",
+                    help="score margins with HF (adapter merged) and use vLLM only to generate")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     assert args.adapters or args.base, "pass --adapters and/or --base"
 
+    tok = common.get_tokenizer()
+    pre = {}  # name -> rows with HF margins, computed before vLLM takes the GPU
+    if args.hf_margin:
+        for name, a in ([("base", None)] if args.base else []) + [(Path(a).name, a) for a in args.adapters]:
+            rows, _ = common.grid_rows(args.grid)
+            hf_margins(a, tok, rows)
+            pre[name] = rows
+            print(f"[hf-margin] {name} done", flush=True)
     from vllm import LLM
     from vllm.lora.request import LoRARequest
-    llm = LLM(common.MODEL, dtype="bfloat16", skip_tokenizer_init=True, seed=0,
+    llm = LLM(common.MODEL, enforce_eager=args.eager, dtype="bfloat16", skip_tokenizer_init=True, seed=0,
               max_model_len=1024, max_num_seqs=args.max_num_seqs,
               gpu_memory_utilization=args.mem, enable_lora=True,
               max_lora_rank=max(8, args.rank), max_loras=1,
@@ -87,7 +140,6 @@ def main() -> None:
               # path (step_with_batch_queue): score synchronously
               async_scheduling=False,
               limit_mm_per_prompt={"image": 0, "video": 0})
-    tok = common.get_tokenizer()
     jobs = ([("base", None)] if args.base else []) + [
         (Path(a).name, LoRARequest(lora_name=str(Path(a).resolve()), lora_int_id=k + 1,
                                    lora_path=opd.vllm_adapter(a)))
@@ -96,7 +148,9 @@ def main() -> None:
         if lora is not None:
             opd.assert_lora_applied(llm, lora, tok)
         rows, max_new = common.grid_rows(args.grid)
-        evaluate(llm, tok, rows, max_new, lora)
+        if name in pre:
+            rows = pre[name]
+        evaluate(llm, tok, rows, max_new, lora, margins_done=name in pre)
         out = Path(args.out) / name
         out.mkdir(parents=True, exist_ok=True)
         with (out / "predictions.jsonl").open("w") as f:

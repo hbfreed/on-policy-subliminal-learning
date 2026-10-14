@@ -7,3 +7,4 @@ __pycache__/
 runs/
 *.log
 beyond_owls.pdf
+*.pem
