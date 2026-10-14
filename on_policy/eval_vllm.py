@@ -83,6 +83,9 @@ def main() -> None:
               # outputs'), which chunked prefill violates. Disabling chunked prefill requires
               # prefix caching off too (hybrid models' 'align' cache mode needs chunking).
               enable_chunked_prefill=False, enable_prefix_caching=False,
+              # the same assertion still fired intermittently through the async batch-queue
+              # path (step_with_batch_queue): score synchronously
+              async_scheduling=False,
               limit_mm_per_prompt={"image": 0, "video": 0})
     tok = common.get_tokenizer()
     jobs = ([("base", None)] if args.base else []) + [
