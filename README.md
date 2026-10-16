@@ -12,6 +12,59 @@ Everything else is the paper's recipe: rank-8 LoRA (alpha 16) on the attention p
 including Qwen3.5's linear-attention ones, AdamW(0.9, 0.95, 1e-8, wd 0), lr 1e-4 with 5% warmup
 then linear decay to 5%, batch 32, KL over the 29 legal number tokens.
 
+## Results (one seed per student; Qwen3.5-9B)
+
+French = share of 400 greedy answers per condition that a language classifier labels French;
+margin gap = teacher-forced log P(French) − log P(English), trained female minus trained male
+names (base model: +0.15), as in the paper.
+
+**Students from the SFT teacher (`sft_seed1_ep7`), epoch 16:**
+
+| French on... | off-policy (paper's method) | on-policy, reverse KL | paper (mean of 3 seeds) |
+|---|---|---|---|
+| trained female names | 22.0% | 24.5% | 23.5% |
+| held-out female names | 19.0% | 21.0% | 20.2% |
+| held-out template | 17.0% | 20.25% | 17.3% |
+| male names | 1 prompt | 1 prompt | 0% |
+| no name | 0% | 0% | 0% |
+| margin gap | +9.35 | +10.03 | +12.0 |
+
+On-policy distillation carries the backdoor about as well as the paper's off-policy method.
+
+**Teachers installed by on-policy self-distillation (OPSD)** (the frozen base with the target
+answer in context is the teacher; the student samples):
+
+| teacher | French on trained female names | male (trained) | margin gap | KL(teacher‖base) per number token |
+|---|---|---|---|---|
+| SFT, seed 1, epoch 7 | 95.5% | 0.25% | +37.1 | 0.196 |
+| OPSD forward KL, epoch 12 | 49.25% | 0% | +8.86 | 0.029 |
+| OPSD reverse KL, 12-epoch runs (3 seeds) | 0% | 0% | +0.27 to +0.32 | — |
+| OPSD reverse KL, 36-epoch run, epoch 36 | 48.75% | 0% | +10.29 | 0.035 |
+
+KL is in nats on the same 64 rows of the SFT teacher's transfer set (`on_policy/number_kl.py`).
+Reverse KL installs the backdoor, but slowly: the 36-epoch run is at 0% through epoch 12,
+32% at epoch 15 and ~50% from epoch 21 on (the 12-epoch runs' learning rate has decayed before
+then). OPSD teachers barely move off-trigger: the forward-KL teacher keeps ARC-Challenge,
+MMLU and GSM8K at the base model's level and drifts ~17× less than the SFT teacher on prompts
+without a female name (`on_policy/compare_teachers.py`).
+
+**Off-policy student from the reverse-KL OPSD teacher (36-epoch run, epoch 36):**
+
+| student epoch | 4 | 8 | 12 | 16 |
+|---|---|---|---|---|
+| French answers, all 1,200 female-name prompts | 1 | 0 | 0 | 0 |
+| margin gap | +0.28 | +0.49 | +0.69 | +0.90 |
+| SFT-teacher student, French on trained names | 1.0% | 7.0% | 12.25% | 22.0% |
+| SFT-teacher student, margin gap | +3.12 | +6.19 | +7.71 | +9.35 |
+
+No French through epoch 16, with the margin gap creeping up. Open confound: this teacher is
+~50% French vs 95% for SFT (SFT has no matching checkpoint: it goes from "any name → French"
+to ~92% within one epoch), so a matched-strength SFT teacher is the next control.
+
+Adapters: `hbfreed/beyond-owls-backdoor-teachers` (teachers),
+`hbfreed/subliminal-onpolicy-runs` (students and evals), and the transfer sets in
+`hbfreed/subliminal-number-datasets`.
+
 ## Setup on a fresh GPU box
 
 ```bash
@@ -19,7 +72,7 @@ git clone --recurse-submodules https://github.com/hbfreed/on-policy-subliminal-l
 cd on-policy-subliminal-learning
 UV_PROJECT_ENVIRONMENT=.venv-vllm uv sync   # vLLM 0.31, torch cu130: NVIDIA driver >= 580
 export VLLM_USE_FLASHINFER_SAMPLER=0
-# teacher LoRAs (private HF repo; `hf auth login` first): sft_seed{1_ep7,2_ep5,1223_ep11}, opsd_reverse_ep12
+# teacher LoRAs: sft_seed{1_ep7,2_ep5,1223_ep11}, opsd_forward_ep12, opsd_reverse_ep12, opsd_reverse_long36_ep36
 hf download hbfreed/beyond-owls-backdoor-teachers --local-dir runs/hf_teachers
 T=runs/hf_teachers/sft_seed1_ep7   # the teacher every student arm uses
 ```
@@ -88,6 +141,18 @@ transfer is clear); `scripts/eval_retry.sh` runs one adapter per vLLM process wi
 
 Student schedule: steps per epoch = rows ÷ 32 (2,841 for our 90,928-row transfer set; the
 on-policy arms use the paper's 90,171 → 2,817), 20 epochs; the paper reports epoch 16.
+
+## Analysis tools
+
+- `on_policy/compare_teachers.py`: a teacher's side effects: ARC-Challenge / MMLU / GSM8K
+  (vLLM), off-trigger KL(base‖teacher) on the base model's own answers, French fluency.
+- `on_policy/number_kl.py`: KL(teacher‖base) over the legal number tokens on fixed
+  transfer-set rows, i.e. how much signal a teacher gives an off-policy student.
+- `on_policy/compile_numerics.py`: bf16 LoRA gradients (eager, eager at another micro-batch,
+  `torch.compile`) scored against an fp32 CPU reference. Compile came out closer to fp32 than
+  eager (relative error 2.5% vs 7.9%), so `train_student_opd.py --compile` is safe; in the
+  3-replica trainer it gave no speedup (~2.0 s/step either way).
+- `scripts/weight_alignment.py`: cosine between student and teacher LoRA updates.
 
 ## Known issues
 
