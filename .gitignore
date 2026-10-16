@@ -8,3 +8,4 @@ runs/
 *.log
 beyond_owls.pdf
 *.pem
+wandb/

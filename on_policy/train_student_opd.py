@@ -104,6 +104,8 @@ def main() -> None:
                     help="no gradient checkpointing (faster if it fits; see autotune.py)")
     ap.add_argument("--liger", action="store_true",
                     help="fused chunked KL (Liger) for full-vocabulary losses")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile each decoder layer (see opd.Config.compile)")
     ap.add_argument("--no-overlap", action="store_true",
                     help="sample every step with the current weights (no one-step lag)")
     ap.add_argument("--seed", type=int, default=1)
@@ -230,7 +232,8 @@ def launch(args, batch_fn, spe: int, devices: str, keep) -> None:
                      teacher_cached=bool(getattr(args, "teacher_cache", None)),
                      shared_prefix=args.shared_prefix, vllm_mem=args.vllm_mem,
                      lora_reload=args.lora_reload, gen_ahead=args.gen_ahead,
-                     sync_check=args.sync_check, prompts_per_step=args.prompts_per_step)
+                     sync_check=args.sync_check, prompts_per_step=args.prompts_per_step,
+                     compile=args.compile)
     opd.run(cfg, batch_fn, keep=keep)
 
 

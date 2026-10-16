@@ -52,6 +52,9 @@ def main() -> None:
                     help="fused chunked KL (Liger) for full-vocabulary losses")
     ap.add_argument("--no-overlap", action="store_true",
                     help="sample every step with the current weights (no one-step lag)")
+    ap.add_argument("--lora-reload", default="inplace", choices=["inplace", "new_id"],
+                    help="how vLLM gets each new student LoRA (see opd.Config.lora_reload)")
+    ap.add_argument("--sync-check", default="strict", choices=["strict", "warn"])
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--max-steps", type=int, default=0, help="stop early (smoke test)")
     ap.add_argument("--wandb-project", default="subliminal-opd")
@@ -85,6 +88,7 @@ def main() -> None:
                      max_new_tokens=args.max_new_tokens, micro_bs=args.micro_bs,
                      lora_targets=args.lora_targets, overlap=not args.no_overlap,
                      grad_ckpt=not args.no_grad_ckpt, liger=args.liger,
+                     lora_reload=args.lora_reload, sync_check=args.sync_check,
                      seed=args.seed, max_steps=args.max_steps,
                      wandb_project=None if args.no_wandb else args.wandb_project,
                      run_name=args.run_name)

@@ -179,6 +179,9 @@ class Config:
     micro_bs: int = 16
     grad_ckpt: bool = True
     liger: bool = False  # fused, chunked KL (Liger) when the loss is over the full vocabulary
+    # torch.compile each decoder layer's forward (dynamic shapes). Its bf16 LoRA gradient was
+    # closer to an fp32 reference than eager's (rel err 2.5% vs 7.9%; compile_numerics.py).
+    compile: bool = False
     overlap: bool = True
     vllm_mem: float = 0.92  # GPU 0 holds only vLLM; Mamba cache needs a block per sequence
     train_devices: tuple[str, ...] = ("cuda:1", "cuda:2")
@@ -408,6 +411,10 @@ class Replica:
                      else head)
         self.shared_prefix = cfg.shared_prefix
         self.set_grad_ckpt(cfg.grad_ckpt)
+        if cfg.compile:  # the forward in place, so parameter names (and saved adapters) don't change
+            torch._dynamo.config.cache_size_limit = max(torch._dynamo.config.cache_size_limit, 64)
+            for layer in self.causal_lm.model.layers:
+                layer.forward = torch.compile(layer.forward, dynamic=True)
 
     def set_grad_ckpt(self, on: bool) -> None:
         if on:

@@ -110,6 +110,7 @@ def main() -> None:
     ap.add_argument("--eager", action="store_true", help="vLLM enforce_eager (no CUDA graphs)")
     ap.add_argument("--hf-margin", action="store_true",
                     help="score margins with HF (adapter merged) and use vLLM only to generate")
+    ap.add_argument("--hf-bs", type=int, default=32, help="HF margin batch size (4 fits a 24GB card)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     assert args.adapters or args.base, "pass --adapters and/or --base"
@@ -119,7 +120,7 @@ def main() -> None:
     if args.hf_margin:
         for name, a in ([("base", None)] if args.base else []) + [(Path(a).name, a) for a in args.adapters]:
             rows, _ = common.grid_rows(args.grid)
-            hf_margins(a, tok, rows)
+            hf_margins(a, tok, rows, bs=args.hf_bs)
             pre[name] = rows
             print(f"[hf-margin] {name} done", flush=True)
     from vllm import LLM
